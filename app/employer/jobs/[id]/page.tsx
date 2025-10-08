@@ -97,7 +97,7 @@ async function getJobWithApplications(jobId: string, employerId: number) {
   }
 }
 
-export default async function JobManagePage({ params }: { params: { id: string } }) {
+export default async function JobManagePage({ params }: { params: Promise<{ id: string }> }) {
   const cookieStore = await cookies()
   const token = cookieStore.get("auth-token")?.value
 
@@ -110,7 +110,8 @@ export default async function JobManagePage({ params }: { params: { id: string }
     redirect("/login")
   }
 
-  const data = await getJobWithApplications(params.id, user.id)
+  const resolvedParams = await params
+  const data = await getJobWithApplications(resolvedParams.id, user.id)
   if (!data) {
     notFound()
   }

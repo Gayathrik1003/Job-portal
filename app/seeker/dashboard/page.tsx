@@ -47,52 +47,65 @@ async function getSeekerData(userId: number) {
   // Get recent available jobs (not applied to), filtered by preferences if present
   let availableJobs: any[] = []
   try {
-    const domains: string[] = Array.isArray((profiles[0]?.job_preferences as any)?.domains)
-      ? (profiles[0]?.job_preferences as any).domains
-      : []
-    const experienceLevel: string | undefined = (profiles[0]?.job_preferences as any)?.experience_level
-    const remotePref: boolean | undefined = (profiles[0]?.job_preferences as any)?.remote_work
-    const seekerLocation: string | undefined = profiles[0]?.location
-
-    let query = `
+    // First get all open jobs
+    const allJobs = await sql`
       SELECT j.*, ep.company_name, ep.logo_url as company_logo
       FROM jobs j
       LEFT JOIN employer_profiles ep ON j.employer_id = ep.user_id
-      LEFT JOIN applications a ON j.id = a.job_id AND a.seeker_id = $1
-      WHERE j.is_open = TRUE AND a.id IS NULL
+      WHERE j.is_open = TRUE
+      ORDER BY j.posted_at DESC
     `
-    const params: (string | number | boolean)[] = [userId]
 
-    // Apply domain preferences
-    if (domains.length > 0) {
-      // Use ORs: (j.domain ILIKE %d1% OR j.domain ILIKE %d2% ...)
-      const domainConds: string[] = []
-      domains.forEach((d) => {
-        params.push(`%${d}%`)
-        domainConds.push(`j.domain ILIKE $${params.length}`)
-      })
-      query += ` AND (${domainConds.join(" OR ")})`
+    // Get user's applications to filter out already applied jobs
+    const userApplications = await sql`
+      SELECT job_id FROM applications WHERE seeker_id = ${userId}
+    `
+    const appliedJobIds = new Set(userApplications.map(app => app.job_id))
+
+    // Filter out applied jobs
+    let filteredJobs = allJobs.filter(job => !appliedJobIds.has(job.id))
+
+    // Apply user preferences if they exist
+    const profile = profiles[0]
+    if (profile?.job_preferences) {
+      const preferences = profile.job_preferences as any
+      const domains: string[] = Array.isArray(preferences.domains) ? preferences.domains : []
+      const experienceLevel: string | undefined = preferences.experience_level
+      const remotePref: boolean | undefined = preferences.remote_work
+      const seekerLocation: string | undefined = profile.location
+
+      // Apply domain preferences
+      if (domains.length > 0) {
+        filteredJobs = filteredJobs.filter(job => 
+          domains.some(domain => 
+            job.domain?.toLowerCase().includes(domain.toLowerCase())
+          )
+        )
+      }
+
+      // Apply experience level preference
+      if (experienceLevel) {
+        filteredJobs = filteredJobs.filter(job => 
+          job.experience_required?.toLowerCase().includes(experienceLevel.toLowerCase())
+        )
+      }
+
+      // Apply remote/location preference
+      if (remotePref === false) {
+        filteredJobs = filteredJobs.filter(job => !job.is_remote)
+      }
+      if (seekerLocation) {
+        filteredJobs = filteredJobs.filter(job => 
+          job.location?.toLowerCase().includes(seekerLocation.toLowerCase()) ||
+          job.country?.toLowerCase().includes(seekerLocation.toLowerCase())
+        )
+      }
     }
 
-    // Apply experience level preference
-    if (experienceLevel) {
-      params.push(`%${experienceLevel}%`)
-      query += ` AND (j.experience_required ILIKE $${params.length})`
-    }
-
-    // Apply remote/location preference
-    if (remotePref === false) {
-      query += ` AND j.is_remote = FALSE`
-    }
-    if (seekerLocation) {
-      params.push(`%${seekerLocation}%`)
-      query += ` AND (j.location ILIKE $${params.length} OR j.country ILIKE $${params.length})`
-    }
-
-    query += ` ORDER BY j.posted_at DESC LIMIT 6`
-
-    availableJobs = await sql.query(query, params)
-  } catch (_) {
+    // Limit to 6 jobs
+    availableJobs = filteredJobs.slice(0, 6)
+  } catch (error) {
+    console.error('Error fetching available jobs:', error)
     availableJobs = []
   }
 

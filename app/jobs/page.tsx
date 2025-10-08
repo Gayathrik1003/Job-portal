@@ -8,12 +8,13 @@ import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { JobsFilters } from "./filters"
 import { sql } from "@/lib/db"
 import { getUserFromToken } from "@/lib/auth"
 import type { Job } from "@/lib/db"
 
 interface JobsPageProps {
-  searchParams: {
+  searchParams: Promise<{
     q?: string
     location?: string
     remote?: string
@@ -22,7 +23,7 @@ interface JobsPageProps {
     domain?: string
     min_salary?: string
     page?: string
-  }
+  }>
 }
 
 async function getJobs(searchParams: JobsPageProps["searchParams"]) {
@@ -31,91 +32,91 @@ async function getJobs(searchParams: JobsPageProps["searchParams"]) {
   const limit = 10
   const offset = (currentPage - 1) * limit
 
-  let query = `
-    SELECT j.*, ep.company_name, ep.logo_url as company_logo
-    FROM jobs j
-    LEFT JOIN employer_profiles ep ON j.employer_id = ep.user_id
-    WHERE j.is_open = TRUE
-  `
-  const queryParams: (string | number)[] = []
+  // Normalize filters to avoid accidental over-filtering
+  const normalizedType = type && type !== "All Types" ? type : undefined
+  const normalizedDomain = domain && domain !== "All Domains" ? domain : undefined
+  const normalizedCurrency = currency && currency.trim() !== "" && currency !== "any" ? currency : undefined
+  const minSalaryNum = min_salary ? Number.parseInt(min_salary) : NaN
 
-  if (q) {
-    query += ` AND (j.title ILIKE $${queryParams.length + 1} OR j.description ILIKE $${queryParams.length + 2} OR ep.company_name ILIKE $${queryParams.length + 3})`
-    queryParams.push(`%${q}%`, `%${q}%`, `%${q}%`)
-  }
-  if (location) {
-    query += ` AND j.location ILIKE $${queryParams.length + 1}`
-    queryParams.push(`%${location}%`)
-  }
-  if (remote === "true") {
-    query += ` AND j.is_remote = TRUE`
-  }
-  if (type) {
-    query += ` AND j.job_type ILIKE $${queryParams.length + 1}`
-    queryParams.push(`%${type}%`)
-  }
-  if (domain) {
-    query += ` AND j.domain ILIKE $${queryParams.length + 1}`
-    queryParams.push(`%${domain}%`)
-  }
-  if (currency) {
-    // Filter salaries that mention the chosen currency (symbol or code)
-    query += ` AND j.salary IS NOT NULL AND (j.salary ILIKE $${queryParams.length + 1})`
-    queryParams.push(`%${currency}%`)
-  }
-  if (min_salary) {
-    // This is a simplified salary filter. In a real app, you'd parse salary ranges.
-    query += ` AND j.salary IS NOT NULL AND j.salary != '' AND CAST(regexp_replace(j.salary, '[^0-9.]', '', 'g') AS NUMERIC) >= $${queryParams.length + 1}`
-    queryParams.push(Number.parseInt(min_salary))
+  // Start with a simple query to get all open jobs
+  let jobs: any[] = []
+  let totalJobs = 0
+
+  try {
+    // First, get all open jobs with basic info
+    const allJobs = await sql`
+      SELECT j.*, ep.company_name, ep.logo_url as company_logo
+      FROM jobs j
+      LEFT JOIN employer_profiles ep ON j.employer_id = ep.user_id
+      WHERE j.is_open = true
+      ORDER BY j.posted_at DESC
+    `
+    console.log('All jobs query result:', allJobs)
+
+    // Apply filters in JavaScript for now (simpler and more reliable)
+    let filteredJobs = allJobs
+
+    if (q) {
+      const searchTerm = q.toLowerCase()
+      filteredJobs = filteredJobs.filter(job => 
+        job.title?.toLowerCase().includes(searchTerm) ||
+        job.description?.toLowerCase().includes(searchTerm) ||
+        job.company_name?.toLowerCase().includes(searchTerm)
+      )
+    }
+
+    if (location) {
+      const locationTerm = location.toLowerCase()
+      filteredJobs = filteredJobs.filter(job => 
+        job.location?.toLowerCase().includes(locationTerm)
+      )
+    }
+
+    if (remote === "true") {
+      filteredJobs = filteredJobs.filter(job => job.is_remote === true)
+    }
+
+    if (normalizedType) {
+      filteredJobs = filteredJobs.filter(job => 
+        job.job_type?.toLowerCase().includes(normalizedType.toLowerCase())
+      )
+    }
+
+    if (normalizedDomain) {
+      filteredJobs = filteredJobs.filter(job => 
+        job.domain?.toLowerCase().includes(normalizedDomain.toLowerCase())
+      )
+    }
+
+    if (normalizedCurrency) {
+      filteredJobs = filteredJobs.filter(job => 
+        job.salary?.includes(normalizedCurrency)
+      )
+    }
+
+    if (Number.isFinite(minSalaryNum)) {
+      filteredJobs = filteredJobs.filter(job => {
+        if (!job.salary) return false
+        const salaryMatch = job.salary.match(/\d+/)
+        if (!salaryMatch) return false
+        return parseInt(salaryMatch[0]) >= minSalaryNum
+      })
+    }
+
+    totalJobs = filteredJobs.length
+    jobs = filteredJobs.slice(offset, offset + limit)
+
+  } catch (error) {
+    console.error('Error fetching jobs:', error)
+    // Fallback to simple query
+    jobs = await sql`SELECT * FROM jobs WHERE is_open = true LIMIT 10`
+    totalJobs = jobs.length
   }
 
-  query += ` ORDER BY j.posted_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`
-  queryParams.push(limit, offset)
-
-  const jobs = await sql.query(query, queryParams)
-
-  // Build count query with its own independent parameter indexing
-  let countQuery = `
-    SELECT COUNT(*)
-    FROM jobs j
-    LEFT JOIN employer_profiles ep ON j.employer_id = ep.user_id
-    WHERE j.is_open = TRUE
-  `
-  const countQueryParams: (string | number)[] = []
-  if (q) {
-    countQuery += ` AND (j.title ILIKE $${countQueryParams.length + 1} OR j.description ILIKE $${countQueryParams.length + 2} OR ep.company_name ILIKE $${countQueryParams.length + 3})`
-    countQueryParams.push(`%${q}%`, `%${q}%`, `%${q}%`)
-  }
-  if (location) {
-    countQuery += ` AND j.location ILIKE $${countQueryParams.length + 1}`
-    countQueryParams.push(`%${location}%`)
-  }
-  if (remote === "true") {
-    countQuery += ` AND j.is_remote = TRUE`
-  }
-  if (type) {
-    countQuery += ` AND j.job_type ILIKE $${countQueryParams.length + 1}`
-    countQueryParams.push(`%${type}%`)
-  }
-  if (domain) {
-    countQuery += ` AND j.domain ILIKE $${countQueryParams.length + 1}`
-    countQueryParams.push(`%${domain}%`)
-  }
-  if (currency) {
-    countQuery += ` AND j.salary IS NOT NULL AND (j.salary ILIKE $${countQueryParams.length + 1})`
-    countQueryParams.push(`%${currency}%`)
-  }
-  if (min_salary) {
-    countQuery += ` AND j.salary IS NOT NULL AND j.salary != '' AND CAST(regexp_replace(j.salary, '[^0-9.]', '', 'g') AS NUMERIC) >= $${countQueryParams.length + 1}`
-    countQueryParams.push(Number.parseInt(min_salary))
-  }
-
-  const totalJobsResult = await sql.query(countQuery, countQueryParams)
-  const totalJobs = Number(totalJobsResult[0].count)
   const totalPages = Math.ceil(totalJobs / limit)
 
   return {
-    jobs: jobs as Job[],
+    jobs: Array.isArray(jobs) ? jobs : [],
     totalJobs,
     totalPages,
     currentPage,
@@ -127,10 +128,13 @@ export default async function JobsPage({ searchParams }: JobsPageProps) {
   const token = cookieStore.get("auth-token")?.value
   const user = token ? await getUserFromToken(token) : null
 
-  const { jobs, totalPages, currentPage } = await getJobs(searchParams)
+  // In Next.js 15, searchParams is a Promise
+  const sp = (await searchParams) || {}
+
+  const { jobs, totalPages, currentPage } = await getJobs(sp)
 
   const currentQuery = new URLSearchParams()
-  Object.entries(searchParams).forEach(([key, value]) => {
+  Object.entries(sp).forEach(([key, value]) => {
     if (typeof value === "string") {
       currentQuery.set(key, value)
     }
@@ -212,126 +216,15 @@ export default async function JobsPage({ searchParams }: JobsPageProps) {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
           {/* Filters Sidebar */}
           <div className="md:col-span-1">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Filters</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <form className="space-y-6">
-                  <div className="space-y-2">
-                    <Label htmlFor="q">Keywords</Label>
-                    <div className="relative">
-                      <Input
-                        id="q"
-                        name="q"
-                        placeholder="Job title, company, keywords"
-                        defaultValue={searchParams.q || ""}
-                        className="pl-8"
-                      />
-                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="location">Location</Label>
-                    <div className="relative">
-                      <Input
-                        id="location"
-                        name="location"
-                        placeholder="City, Country"
-                        defaultValue={searchParams.location || ""}
-                        className="pl-8"
-                      />
-                      <MapPin className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="type">Job Type</Label>
-                    <Select name="type" defaultValue={searchParams.type || "All Types"}>
-                      <SelectTrigger id="type">
-                        <SelectValue placeholder="Select job type" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="All Types">All Types</SelectItem>
-                        {jobTypes.map((type) => (
-                          <SelectItem key={type} value={type}>
-                            {type}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="domain">Domain</Label>
-                    <Select name="domain" defaultValue={searchParams.domain || "All Domains"}>
-                      <SelectTrigger id="domain">
-                        <SelectValue placeholder="Select domain" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="All Domains">All Domains</SelectItem>
-                        {domains.map((domain) => (
-                          <SelectItem key={domain} value={domain}>
-                            {domain}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="currency">Currency</Label>
-                    <Select name="currency" defaultValue={searchParams.currency || ""}>
-                      <SelectTrigger id="currency">
-                        <SelectValue placeholder="Any currency" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="">Any</SelectItem>
-                        {currencies.map((c) => (
-                          <SelectItem key={c.label} value={c.value}>
-                            {c.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="min_salary">Minimum Salary</Label>
-                    <div className="relative">
-                      <Input
-                        id="min_salary"
-                        name="min_salary"
-                        type="number"
-                        placeholder="e.g., 50000"
-                        defaultValue={searchParams.min_salary || ""}
-                        className="pl-8"
-                      />
-                      <DollarSign className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center space-x-2">
-                    <Checkbox id="remote" name="remote" value="true" defaultChecked={searchParams.remote === "true"} />
-                    <Label htmlFor="remote">Remote Jobs Only</Label>
-                  </div>
-
-                  <div className="flex space-x-2">
-                    <Button type="submit" className="w-full">
-                      <Filter className="h-4 w-4 mr-2" />
-                      Apply Filters
-                    </Button>
-                    <Link href="/jobs">
-                      <Button variant="outline" className="w-full bg-transparent">
-                        <X className="h-4 w-4 mr-2" />
-                        Clear
-                      </Button>
-                    </Link>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
+            <JobsFilters
+              q={sp.q}
+              location={sp.location}
+              remote={sp.remote}
+              currency={sp.currency}
+              type={sp.type}
+              domain={sp.domain}
+              min_salary={sp.min_salary}
+            />
           </div>
 
           {/* Job Listings */}
